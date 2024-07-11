@@ -1,5 +1,7 @@
 import os
+import subprocess
 import sys
+import uuid
 from dotenv import load_dotenv
 
 now_dir = os.getcwd()
@@ -31,6 +33,10 @@ import traceback
 import threading
 import shutil
 import logging
+
+import azure.cognitiveservices.speech as speechsdk
+
+# TODO: read from .env
 
 
 logging.getLogger("numba").setLevel(logging.WARNING)
@@ -69,6 +75,8 @@ ngpu = torch.cuda.device_count()
 gpu_infos = []
 mem = []
 if_gpu_ok = False
+
+print("=============== device: ", config.n_cpu)
 
 if torch.cuda.is_available() or ngpu != 0:
     for i in range(ngpu):
@@ -220,6 +228,8 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p):
     os.makedirs("%s/logs/%s" % (now_dir, exp_dir), exist_ok=True)
     f = open("%s/logs/%s/preprocess.log" % (now_dir, exp_dir), "w")
     f.close()
+    logger.debug("============================  %s", config.noparallel )
+    logger.debug("============================  %s", config.preprocess_per )
     cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s/logs/%s" %s %.1f' % (
         config.python_cmd,
         trainset_dir,
@@ -607,8 +617,21 @@ def click_train(
             )
         )
     logger.info("Execute: " + cmd)
-    p = Popen(cmd, shell=True, cwd=now_dir)
-    p.wait()
+
+    p = Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, universal_newlines=True, cwd=now_dir)
+
+    for stdout_line in iter(p.stdout.readline, ""):
+        print(stdout_line)
+        yield stdout_line.rstrip()
+    
+    p.stdout.close()
+    return_code = p.wait()
+    
+    if return_code:
+        for stderr_line in iter(p.stderr.readline, ""):
+            print(stderr_line)
+            yield stderr_line.rstrip()
+    
     return "训练结束, 您可查看控制台训练日志或实验文件夹下的train.log"
 
 
@@ -753,7 +776,7 @@ def train1key(
 
     # step3a:训练模型
     yield get_info_str(i18n("step3a:正在训练模型"))
-    click_train(
+    for o in click_train(
         exp_dir1,
         sr2,
         if_f0_3,
@@ -768,7 +791,9 @@ def train1key(
         if_cache_gpu17,
         if_save_every_weights18,
         version19,
-    )
+    ):
+        yield get_info_str(o)
+
     yield get_info_str(
         i18n("训练结束, 您可查看控制台训练日志或实验文件夹下的train.log")
     )
@@ -806,6 +831,52 @@ def change_f0_method(f0method8):
     return {"visible": visible, "__type__": "update"}
 
 
+def azure_tts(text, audio_profile):
+    print(text, audio_profile)
+
+    # randome file name for the audio file
+    audio_file_name = str(uuid.uuid4()) + ".wav"
+    file_path = (
+        "/home/ubuntu/Projects/Retrieval-based-Voice-Conversion-WebUI/output/"
+        + audio_file_name
+    )
+
+    speech_config = speechsdk.SpeechConfig(
+        subscription=SPEECH_KEY, region=SPEECH_REGION
+    )
+    audio_config = speechsdk.audio.AudioOutputConfig(
+        use_default_speaker=True, filename=file_path
+    )
+
+    # remove all (xxx), example: "zh-CN-XiaoxiaoNeural (Female)" to be "zh-CN-XiaoxiaoNeural"
+    audio_profile = audio_profile.split(" (")[0]
+    speech_config.speech_synthesis_voice_name = audio_profile
+
+    speech_synthesizer = speechsdk.SpeechSynthesizer(
+        speech_config=speech_config, audio_config=audio_config
+    )
+
+    speech_synthesis_result = speech_synthesizer.speak_text_async(text).get()
+
+    if (
+        speech_synthesis_result.reason
+        == speechsdk.ResultReason.SynthesizingAudioCompleted
+    ):
+        yield ("Speech synthesized for text [{}]".format(text)), file_path
+    elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
+        cancellation_details = speech_synthesis_result.cancellation_details
+        yield (
+            "Speech synthesis canceled: {}".format(cancellation_details.reason)
+        ), None
+        if cancellation_details.reason == speechsdk.CancellationReason.Error:
+            if cancellation_details.error_details:
+                yield (
+                    "Error details: {}".format(cancellation_details.error_details)
+                ), None
+                yield ("Did you set the speech resource key and region values?"), None
+    yield "done, output file path is : " + file_path, file_path
+
+
 with gr.Blocks(title="RVC WebUI") as app:
     gr.Markdown("## RVC WebUI")
     gr.Markdown(
@@ -814,6 +885,310 @@ with gr.Blocks(title="RVC WebUI") as app:
         )
     )
     with gr.Tabs():
+        with gr.TabItem("one click training"):
+            with gr.Row():
+                exp_name = gr.Textbox(
+                    label=("实验名"), placeholder="exp_name", value="one_click_test"
+                )
+                # TODO: 这里应该是批量上传音频文件, 而不是选择一个路径
+                ref_dir_name = gr.Textbox(
+                    label=("参考音频路径"),
+                    placeholder="ref_dir_name",
+                    value="/home/ubuntu/Projects/Retrieval-based-Voice-Conversion-WebUI/reference/fx_clean__rnnoised",
+                )
+
+                epoch = gr.Slider(
+                    label="epoch",
+                    step=1,
+                    maximum=999999,
+                    value=200,
+                )
+
+                convert_btn = gr.Button(
+                    label=("开始训练"),
+                    variant="primary",
+                )
+
+                info_context = gr.Textbox(
+                    label=i18n("输出信息"), value="", max_lines=10
+                )
+
+                convert_btn.click(
+                    fn=train1key,
+                    inputs=[
+                        exp_name,
+                        gr.Textbox(value="48k", visible=False),
+                        gr.Radio(value=True, visible=False),
+                        ref_dir_name,
+                        gr.Slider(
+                            step=1,
+                            value=0,
+                            visible=False,
+                        ),
+                        gr.Slider(
+                            step=1,
+                            value=7,
+                            visible=False,
+                        ),
+                        gr.Textbox(value="rmvpe_gpu", visible=False),
+                        gr.Slider(
+                            step=1,
+                            value=5,
+                            visible=False,
+                        ),
+                        epoch,
+                        gr.Slider(
+                            step=1,
+                            value=8,  # Modify the value to be an integer
+                            visible=False,
+                        ),
+                        gr.Textbox(value=i18n("是"), visible=False),
+                        gr.Textbox(
+                            value="assets/pretrained_v2/f0G48k.pth", visible=False
+                        ),
+                        gr.Textbox(
+                            value="assets/pretrained_v2/f0D48k.pth", visible=False
+                        ),
+                        gr.Textbox(value="0", visible=False),
+                        gr.Textbox(value=i18n("否"), visible=False),
+                        gr.Textbox(value=i18n("否"), visible=False),
+                        gr.Textbox(value="v2", visible=False),
+                        gr.Textbox(value="0-0", visible=False),
+                    ],
+                    outputs=info_context,
+                    api_name="infer_one_click_train",
+                )
+
+            with gr.Row():
+                gr.Markdown(value=("生成语音"))
+                text = gr.Textbox(
+                    label=("文本"),
+                    value="这是一条测试语音",
+                )
+
+                audio_profile = gr.Dropdown(
+                    label="aduio profile",
+                    choices=[
+                        "zh-CN-XiaoxiaoNeural (Female)",
+                        "zh-CN-YunxiNeural (Male)",
+                        "zh-CN-YunjianNeural (Male)",
+                        "zh-CN-XiaoyiNeural (Female)",
+                        "zh-CN-YunyangNeural (Male)",
+                        "zh-CN-XiaochenNeural (Female)",
+                        "zh-CN-XiaohanNeural (Female)",
+                        "zh-CN-XiaomengNeural (Female)",
+                        "zh-CN-XiaomoNeural (Female)",
+                        "zh-CN-XiaoqiuNeural (Female)",
+                        "zh-CN-XiaoruiNeural (Female)",
+                        "zh-CN-XiaoshuangNeural (Female, Child)",
+                        "zh-CN-XiaoyanNeural (Female)",
+                        "zh-CN-XiaoyouNeural (Female, Child)",
+                        "zh-CN-XiaozhenNeural (Female)",
+                        "zh-CN-YunfengNeural (Male)",
+                        "zh-CN-YunhaoNeural (Male)",
+                        "zh-CN-YunxiaNeural (Male)",
+                        "zh-CN-YunyeNeural (Male)",
+                        "zh-CN-YunzeNeural (Male)",
+                        "zh-CN-XiaochenMultilingualNeural1,3 (Female)",
+                        "zh-CN-XiaorouNeural1 (Female)",
+                        "zh-CN-XiaoxiaoDialectsNeural1 (Female)",
+                        "zh-CN-XiaoxiaoMultilingualNeural3 (Female)",
+                        "zh-CN-XiaoyuMultilingualNeural1,3 (Female)",
+                        "zh-CN-YunjieNeural1 (Male)",
+                        "zh-CN-YunyiMultilingualNeural1,3 (Male)",
+                        "en-US-AvaNeural (Female)",
+                        "en-US-AndrewNeural (Male)",
+                        "en-US-EmmaNeural (Female)",
+                        "en-US-BrianNeural (Male)",
+                        "en-US-JennyNeural (Female)",
+                        "en-US-GuyNeural (Male)",
+                        "en-US-AriaNeural (Female)",
+                        "en-US-DavisNeural (Male)",
+                        "en-US-JaneNeural (Female)",
+                        "en-US-JasonNeural (Male)",
+                        "en-US-SaraNeural (Female)",
+                        "en-US-TonyNeural (Male)",
+                        "en-US-NancyNeural (Female)",
+                        "en-US-AmberNeural (Female)",
+                        "en-US-AnaNeural (Female, Child)",
+                        "en-US-AshleyNeural (Female)",
+                        "en-US-BrandonNeural (Male)",
+                        "en-US-ChristopherNeural (Male)",
+                        "en-US-CoraNeural (Female)",
+                        "en-US-ElizabethNeural (Female)",
+                        "en-US-EricNeural (Male)",
+                        "en-US-JacobNeural (Male)",
+                        "en-US-JennyMultilingualNeural3 (Female)",
+                        "en-US-MichelleNeural (Female)",
+                        "en-US-MonicaNeural (Female)",
+                        "en-US-RogerNeural (Male)",
+                        "en-US-RyanMultilingualNeural3 (Male)",
+                        "en-US-SteffanNeural (Male)",
+                        "en-US-AIGenerate1Neural1 (Male)",
+                        "en-US-AIGenerate2Neural1 (Female)",
+                        "en-US-AndrewMultilingualNeural3 (Male)",
+                        "en-US-AvaMultilingualNeural3 (Female)",
+                        "en-US-BlueNeural1 (Neutral)",
+                        "en-US-BrianMultilingualNeural3 (Male)",
+                        "en-US-EmmaMultilingualNeural3 (Female)",
+                        "en-US-AlloyMultilingualNeural4 (Male)",
+                        "en-US-EchoMultilingualNeural4 (Male)",
+                        "en-US-FableMultilingualNeural4 (Neutral)",
+                        "en-US-OnyxMultilingualNeural4 (Male)",
+                        "en-US-NovaMultilingualNeural4 (Female)",
+                        "en-US-ShimmerMultilingualNeural4 (Female)",
+                        "en-US-AlloyMultilingualNeuralHD4 (Male)",
+                        "en-US-EchoMultilingualNeuralHD4 (Male)",
+                        "en-US-FableMultilingualNeuralHD4 (Neutral)",
+                        "en-US-OnyxMultilingualNeuralHD4 (Male)",
+                        "en-US-NovaMultilingualNeuralHD4 (Female)",
+                        "en-US-ShimmerMultilingualNeuralHD4 (Female)",
+                    ],
+                    step=1,
+                    value="zh-CN-YunxiNeural (Male)",
+                )
+
+                convert_btn = gr.Button(
+                    label=("开始生成"),
+                    variant="primary",
+                )
+
+                info_context = gr.Textbox(
+                    label=i18n("输出信息"), value="", max_lines=10
+                )
+
+                audio = gr.Audio(label=i18n("输出音频(右下角三个点,点了可以下载)"))
+
+                convert_btn.click(
+                    fn=azure_tts,
+                    inputs=[
+                        text,
+                        audio_profile,
+                    ],
+                    outputs=[info_context, audio],
+                    api_name="infer_one_click_infer",
+                )
+
+            with gr.Row():
+                gr.Markdown(value=("变声"))
+
+                index_file = gr.Dropdown(
+                    choices=sorted(index_paths),
+                    visible=False,
+                )
+
+                speaker_model = gr.Dropdown(
+                    label=i18n("推理音色"), choices=sorted(names), interactive=True
+                )
+
+                protect = gr.Slider(
+                    minimum=0,
+                    maximum=0.5,
+                    value=0.33,
+                    step=0.01,
+                    visible=False,
+                )
+
+                def _get_vc(sid, *to_return_protect):
+                    # check if sid is str
+                    if not isinstance(sid, str):
+                        return ""
+                    _, _, _, output, *_ = vc.get_vc(sid, *to_return_protect)
+                    return output
+
+                speaker_model.change(
+                    fn=_get_vc,
+                    inputs=[speaker_model, protect, protect],
+                    outputs=index_file,
+                    api_name="infer_change_voice",
+                )
+                with gr.Column():
+                    refresh_button = gr.Button(
+                        i18n("刷新音色列表和索引路径"), variant="primary"
+                    )
+                    refresh_button.click(
+                        fn=lambda: change_choices()[0],
+                        inputs=[],
+                        outputs=speaker_model,
+                        api_name="infer_refresh",
+                    )
+
+                audio_input = gr.Audio(
+                    label="目标音频", source="upload", type="filepath"
+                )
+                modulation = gr.Slider(
+                    minimum=-12, maximum=12, step=1, label="升降调", value=0
+                )
+
+                convert_btn = gr.Button(
+                    label=("开始变声"),
+                    variant="primary",
+                )
+
+                vc_output1 = gr.Textbox(label=i18n("输出信息"))
+
+                audio = gr.Audio(label=i18n("输出音频(右下角三个点,点了可以下载)"))
+
+                convert_btn.click(
+                    vc.vc_single,
+                    [
+                        gr.Slider(
+                            minimum=0,
+                            step=1,
+                            value=0,
+                            visible=False,
+                        ),
+                        audio_input,
+                        modulation,
+                        gr.File(
+                            visible=False,
+                        ),
+                        gr.Radio(
+                            value="rmvpe",
+                            visible=False,
+                        ),
+                        gr.Textbox(
+                            visible=False,
+                        ),
+                        index_file,
+                        gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.75,
+                            visible=False,
+                        ),
+                        gr.Slider(
+                            minimum=0,
+                            maximum=7,
+                            value=3,
+                            step=1,
+                            visible=False,
+                        ),
+                        gr.Slider(
+                            minimum=0,
+                            maximum=48000,
+                            value=0,
+                            step=1,
+                            visible=False,
+                        ),
+                        gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=0.25,
+                            visible=False,
+                        ),
+                        gr.Slider(
+                            minimum=0,
+                            maximum=0.5,
+                            value=0.33,
+                            step=0.01,
+                            visible=False,
+                        ),
+                    ],
+                    [vc_output1, audio],
+                    api_name="infer_convert",
+                )
+
         with gr.TabItem(i18n("模型推理")):
             with gr.Row():
                 sid0 = gr.Dropdown(label=i18n("推理音色"), choices=sorted(names))

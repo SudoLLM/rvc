@@ -1,16 +1,18 @@
 version: "3.8"
 services:
-  rvc:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: rvc
+  rvc_api:
+    image: rvc_api_v2:latest
+    container_name: rvc_api_v2
     volumes:
-      - ./weights:/app/assets/weights
-      - ./opt:/app/opt
+      # - ./weights:/app/assets/weights
+      # - ./opt:/app/opt
+      - /data:/data
+      - ./output:/home/ubuntu/Projects/Retrieval-based-Voice-Conversion-WebUI/output
+      - ./reference:/home/ubuntu/Projects/Retrieval-based-Voice-Conversion-WebUI/reference
+      - ./logs:/home/ubuntu/Projects/Retrieval-based-Voice-Conversion-WebUI/logs
       # - ./dataset:/app/dataset # you can use this folder in order to provide your dataset for model training
     ports:
-      - 7865:7865
+      - 3334:3334
     deploy:
       resources:
         reservations:
