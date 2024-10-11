@@ -20,7 +20,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
 version_config_list = [
     "v1/32k.json",
     "v1/40k.json",
@@ -42,22 +41,41 @@ def singleton_variable(func):
 
 @singleton_variable
 class Config:
-    def __init__(self):
-        self.device = "cuda:0"
-        self.is_half = True
+    def __init__(
+        self,
+        parse_arg: bool = True,
+        device: str = "cuda:0",
+        is_half: bool = True,
+        pycmd: str = sys.executable or "python",
+        port: int = 7865,
+        colab: bool = False,
+        noparallel: bool = False,
+        noautoopen: bool = False,
+        dml: bool = False,
+    ):
+        self.device = device
+        self.is_half = is_half
         self.use_jit = False
         self.n_cpu = 0
         self.gpu_name = None
         self.json_config = self.load_config_json()
         self.gpu_mem = None
-        (
-            self.python_cmd,
-            self.listen_port,
-            self.iscolab,
-            self.noparallel,
-            self.noautoopen,
-            self.dml,
-        ) = self.arg_parse()
+        if parse_arg:
+            (
+                self.python_cmd,
+                self.listen_port,
+                self.iscolab,
+                self.noparallel,
+                self.noautoopen,
+                self.dml,
+            ) = self.arg_parse()
+        else:
+            self.python_cmd = pycmd
+            self.listen_port = port
+            self.iscolab = colab
+            self.noparallel = noparallel
+            self.noautoopen = noautoopen
+            self.dml = dml
         self.instead = ""
         self.preprocess_per = 3.7
         self.x_pad, self.x_query, self.x_center, self.x_max = self.device_config()
@@ -80,9 +98,7 @@ class Config:
         parser.add_argument("--port", type=int, default=7865, help="Listen port")
         parser.add_argument("--pycmd", type=str, default=exe, help="Python command")
         parser.add_argument("--colab", action="store_true", help="Launch in colab")
-        parser.add_argument(
-            "--noparallel", action="store_true", help="Disable parallel processing"
-        )
+        parser.add_argument("--noparallel", action="store_true", help="Disable parallel processing")
         parser.add_argument(
             "--noautoopen",
             action="store_true",
@@ -156,13 +172,7 @@ class Config:
                 self.use_fp32_config()
             else:
                 logger.info("Found GPU %s", self.gpu_name)
-            self.gpu_mem = int(
-                torch.cuda.get_device_properties(i_device).total_memory
-                / 1024
-                / 1024
-                / 1024
-                + 0.4
-            )
+            self.gpu_mem = int(torch.cuda.get_device_properties(i_device).total_memory / 1024 / 1024 / 1024 + 0.4)
             if self.gpu_mem <= 4:
                 self.preprocess_per = 3.0
         elif self.has_mps():
@@ -199,12 +209,7 @@ class Config:
             x_max = 32
         if self.dml:
             logger.info("Use DirectML instead")
-            if (
-                os.path.exists(
-                    "runtime\Lib\site-packages\onnxruntime\capi\DirectML.dll"
-                )
-                == False
-            ):
+            if os.path.exists("runtime\Lib\site-packages\onnxruntime\capi\DirectML.dll") == False:
                 try:
                     os.rename(
                         "runtime\Lib\site-packages\onnxruntime",
@@ -227,12 +232,7 @@ class Config:
         else:
             if self.instead:
                 logger.info(f"Use {self.instead} instead")
-            if (
-                os.path.exists(
-                    "runtime\Lib\site-packages\onnxruntime\capi\onnxruntime_providers_cuda.dll"
-                )
-                == False
-            ):
+            if os.path.exists("runtime\Lib\site-packages\onnxruntime\capi\onnxruntime_providers_cuda.dll") == False:
                 try:
                     os.rename(
                         "runtime\Lib\site-packages\onnxruntime",
@@ -247,8 +247,5 @@ class Config:
                     )
                 except:
                     pass
-        logger.info(
-            "Half-precision floating-point: %s, device: %s"
-            % (self.is_half, self.device)
-        )
+        logger.info("Half-precision floating-point: %s, device: %s" % (self.is_half, self.device))
         return x_pad, x_query, x_center, x_max
