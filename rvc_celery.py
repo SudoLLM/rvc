@@ -1,11 +1,12 @@
 import os
 
 import scipy
+from mcelery.celery import celery_app
+from mcelery.cos import cos_local, download_cos_file, get_local_path, upload_cos_file
+from mcelery.infer import register_infer_tasks
 
 from configs.config import Config
 from infer.modules.vc.modules import VC
-from mcelery.cos import cos_local, download_cos_file, get_local_path, upload_cos_file
-from mcelery.infer import celery_app, register_infer_tasks
 
 # rewrite env
 os.environ["weight_root"] = str(cos_local)
@@ -15,7 +16,7 @@ os.environ["rmvpe_root"] = "assets/rmvpe"
 rvc = VC(Config(parse_arg=False))
 
 
-@celery_app.task(name="rvc_infer", queue="rvc_infer")
+@celery_app.task(lazy=False, name="rvc_infer", queue="rvc_infer", autoretry_for=(Exception,), default_retry_delay=10)
 def rvc_infer_task(audio_cos: str, index_cos: str, model_cos: str, pitch: int, output_cos: str) -> str:
     audio_path = download_cos_file(audio_cos)
     index_path = download_cos_file(index_cos)

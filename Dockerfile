@@ -15,7 +15,7 @@ WORKDIR /app/rvc
 COPY requirements.txt /app/rvc/requirements.txt
 RUN pip install -r requirements.txt
 # 使用原始源安装 mcelery, 镜像不够新
-RUN pip install -i https://pypi.org/simple mcelery==0.0.3
+RUN pip install -i https://pypi.org/simple mcelery==0.1.0
 
 COPY . /app/rvc/
 CMD celery -A rvc_celery worker -l INFO -E -P solo -Q rvc_infer -n rvc_worker
